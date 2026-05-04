@@ -198,6 +198,37 @@ export default function HomePage() {
         ))}
       </div>
 
+      {state.carePlans.flatMap((p) => p.medications).some((m) => m.prn || m.frequency === "as_needed") && (
+        <section className="px-5 pt-6 pb-2">
+          <h2 className="font-semibold mb-2">As-needed (PRN)</h2>
+          <div className="flex gap-2 flex-wrap">
+            {state.carePlans
+              .flatMap((p) => p.medications)
+              .filter((m) => m.prn || m.frequency === "as_needed")
+              .map((m) => (
+                <button
+                  key={m.id}
+                  onClick={() => {
+                    const now = new Date();
+                    const time = `${String(now.getHours()).padStart(2, "0")}:${String(
+                      now.getMinutes(),
+                    ).padStart(2, "0")}`;
+                    const today = new Date().toISOString().slice(0, 10);
+                    logDose(m.id, `${m.id}|${today}|${time}`, "taken");
+                  }}
+                  className="rounded-xl border border-card-border bg-card px-3 py-2 text-left flex items-center gap-2"
+                >
+                  <span className="size-7 rounded-lg bg-accent/15 text-accent flex items-center justify-center font-bold">+</span>
+                  <span>
+                    <span className="block text-sm font-semibold">{m.name}</span>
+                    <span className="block text-[10px] text-muted">{m.dose}</span>
+                  </span>
+                </button>
+              ))}
+          </div>
+        </section>
+      )}
+
       {state.carePlans[0]?.instructions?.length ? (
         <section className="px-5 pt-6 pb-2">
           <h2 className="font-semibold mb-2">Care plan reminders</h2>

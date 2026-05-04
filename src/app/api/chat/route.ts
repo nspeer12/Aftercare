@@ -1,5 +1,5 @@
 import { streamText, type ModelMessage } from "ai";
-import { anthropic } from "@ai-sdk/anthropic";
+import { anthropicProvider, CHAT_MODEL } from "@/lib/ai";
 import type { CarePlan } from "@/lib/types";
 import { FREQUENCY_LABEL } from "@/lib/schedule";
 
@@ -64,7 +64,7 @@ export async function POST(req: Request) {
     const system = SYSTEM_TEMPLATE(planToContext(carePlan));
 
     const result = streamText({
-      model: anthropic("claude-sonnet-4-6"),
+      model: anthropicProvider(CHAT_MODEL),
       system,
       messages: messages.map<ModelMessage>((m) => ({
         role: m.role,

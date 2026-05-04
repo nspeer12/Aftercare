@@ -1,6 +1,6 @@
-import { generateObject } from "ai";
-import { anthropic } from "@ai-sdk/anthropic";
+import { generateText, type UserModelMessage } from "ai";
 import { z } from "zod";
+import { anthropicProvider, EXTRACTION_MODEL } from "@/lib/ai";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -52,14 +52,34 @@ const ExtractionSchema = z.object({
   rawNotes: z.string().optional(),
 });
 
-const SYSTEM = `You are a careful clinical document extractor. You convert after-visit summaries (AVS), discharge instructions, or medication lists into a strict JSON schema.
+const SYSTEM = `You are a careful clinical document extractor. You convert after-visit summaries (AVS), discharge instructions, or medication lists into a strict JSON object.
+
+Return ONLY a JSON object inside a single \`\`\`json fenced code block. No prose before or after.
+
+Schema:
+{
+  "provider": { "name"?: string, "facility"?: string, "phone"?: string, "visitDate"?: string (ISO YYYY-MM-DD if possible) },
+  "diagnosis"?: string,
+  "medications": [{
+    "name": string,
+    "dose": string,
+    "route"?: string,
+    "frequency": one of [once_daily, twice_daily, three_times_daily, four_times_daily, every_4_hours, every_6_hours, every_8_hours, every_12_hours, as_needed, weekly, custom],
+    "prn"?: boolean,
+    "indication"?: string,
+    "instructions"?: string,
+    "times": string[] (HH:MM, 24h)
+  }],
+  "instructions": [{ "text": string, "category"?: one of [diet, activity, followup, warning, other] }],
+  "rawNotes"?: string
+}
 
 Rules:
-- Only include medications explicitly listed in the document. Do not invent or infer drugs.
-- Normalize frequencies into the enum. "Every 8 hours as needed" => frequency: "every_8_hours", prn: true.
-- "times" should be 24h "HH:MM" strings reflecting recommended schedule. If unclear, leave it [] and trust the app to default it from frequency.
-- Parse non-medication discharge guidance (diet, activity, follow-up, warning signs) as instruction items, one per logical line.
-- Be conservative — if a field is not present, omit it.`;
+- Only include medications EXPLICITLY listed. Do not invent drugs.
+- "Every 8 hours as needed for nausea" => frequency: "every_8_hours", prn: true, indication: "nausea".
+- For times, leave [] if unclear.
+- Parse non-medication discharge guidance (diet, activity, follow-up, warnings) as instruction items, one per logical line.
+- Omit any field that is not present.`;
 
 interface Body {
   imageDataUrl?: string;
@@ -71,6 +91,12 @@ function dataUrlToBuffer(dataUrl: string): { buffer: Buffer; mediaType: string }
   const match = /^data:([^;]+);base64,(.*)$/.exec(dataUrl);
   if (!match) throw new Error("Invalid data URL");
   return { mediaType: match[1], buffer: Buffer.from(match[2], "base64") };
+}
+
+function extractJsonBlock(text: string): unknown {
+  const fence = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(text);
+  const candidate = fence ? fence[1] : text;
+  return JSON.parse(candidate);
 }
 
 export async function POST(req: Request) {
@@ -94,14 +120,11 @@ export async function POST(req: Request) {
       );
     }
 
-    const userParts: Array<
-      | { type: "text"; text: string }
-      | { type: "image"; image: string | Buffer }
-      | { type: "file"; data: Buffer; mediaType: string }
-    > = [
+    const userParts: Exclude<UserModelMessage["content"], string> = [
       {
         type: "text",
-        text: "Extract the medication regimen and discharge instructions from this after-visit summary. Return only what is present in the document.",
+        text:
+          "Extract the medication regimen and discharge instructions from this after-visit summary. Return ONLY the JSON object as instructed.",
       },
     ];
 
@@ -113,18 +136,41 @@ export async function POST(req: Request) {
       userParts.push({ type: "file", data: buffer, mediaType });
     }
     if (body.text) {
-      userParts.push({ type: "text", text: `\nAdditional text:\n${body.text}` });
+      userParts.push({ type: "text", text: `\nDocument text:\n${body.text}` });
     }
 
-    const { object } = await generateObject({
-      model: anthropic("claude-sonnet-4-6"),
-      schema: ExtractionSchema,
+    const { text } = await generateText({
+      model: anthropicProvider(EXTRACTION_MODEL),
       system: SYSTEM,
       messages: [{ role: "user", content: userParts }],
     });
 
-    return Response.json(object);
+    let parsed: unknown;
+    try {
+      parsed = extractJsonBlock(text);
+    } catch (e) {
+      console.error("Failed to parse extraction", e, text);
+      return Response.json(
+        { error: "Model returned non-JSON output", raw: text },
+        { status: 502 },
+      );
+    }
+
+    const validation = ExtractionSchema.safeParse(parsed);
+    if (!validation.success) {
+      return Response.json(
+        {
+          error: "Extraction failed schema validation",
+          issues: validation.error.issues,
+          raw: parsed,
+        },
+        { status: 502 },
+      );
+    }
+
+    return Response.json(validation.data);
   } catch (err) {
+    console.error("/api/extract failed", err);
     const message = err instanceof Error ? err.message : "Unknown error";
     return Response.json({ error: message }, { status: 500 });
   }
